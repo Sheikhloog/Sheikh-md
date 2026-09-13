@@ -15,7 +15,6 @@ const DOWNLOAD_TIMEOUT = 180000; // 3 minutes
 const SELECTION_EXPIRE_TIME = 10 * 60 * 1000; // 10 minutes
 
 // Render Secret File path
-// Environment variable se custom path bhi de sakte ho
 const COOKIES_PATH =
   process.env.YT_COOKIES_PATH ||
   "/etc/secrets/cookies.txt";
@@ -24,15 +23,15 @@ const COOKIES_PATH =
 const pendingSelections = new Map();
 
 // ======================================================
-// YOUTUBE DOWNLOAD OPTIONS
+// YT-DLP OPTIONS
 // ======================================================
 
 function getYtDlpOptions() {
   const options = {
-    // JavaScript runtime for YouTube challenge solving
+    // YouTube JavaScript challenge solving
     jsRuntimes: "node",
 
-    // yt-dlp EJS challenge scripts
+    // Download EJS challenge scripts
     remoteComponents: "ejs:github"
   };
 
@@ -40,18 +39,20 @@ function getYtDlpOptions() {
     if (fs.existsSync(COOKIES_PATH)) {
       const stats = fs.statSync(COOKIES_PATH);
 
-      if (stats.size > 0) {
+      if (stats.isFile() && stats.size > 0) {
         console.log(
           `🍪 YouTube cookies loaded: ${COOKIES_PATH}`
         );
 
         options.cookies = COOKIES_PATH;
       } else {
-        console.warn("⚠️ Cookies file empty hai.");
+        console.warn(
+          "⚠️ YouTube cookies file empty ya invalid hai."
+        );
       }
     } else {
       console.warn(
-        `⚠️ Cookies file nahi mili: ${COOKIES_PATH}`
+        `⚠️ YouTube cookies file nahi mili: ${COOKIES_PATH}`
       );
     }
   } catch (error) {
@@ -98,7 +99,7 @@ async function sendText(sock, message, text) {
   return sock.sendMessage(
     message.key.remoteJid,
     {
-      text
+      text: String(text)
     },
     {
       quoted: message
@@ -107,18 +108,18 @@ async function sendText(sock, message, text) {
 }
 
 function getChatId(message) {
-  return message.key?.remoteJid || "";
+  return message?.key?.remoteJid || "";
 }
 
 function getQuotedMessageId(message) {
   return (
-    message.message?.extendedTextMessage?.contextInfo
+    message?.message?.extendedTextMessage?.contextInfo
       ?.stanzaId || ""
   );
 }
 
 function getMessageText(message) {
-  const msg = message.message || {};
+  const msg = message?.message || {};
 
   return (
     msg.conversation ||
@@ -126,7 +127,9 @@ function getMessageText(message) {
     msg.imageMessage?.caption ||
     msg.videoMessage?.caption ||
     ""
-  ).trim();
+  )
+    .trim()
+    .toLowerCase();
 }
 
 // ======================================================
@@ -174,7 +177,9 @@ function safeFileName(name = "media") {
 }
 
 function formatSize(bytes) {
-  if (!bytes || bytes <= 0) return "Unknown";
+  if (!bytes || bytes <= 0) {
+    return "Unknown";
+  }
 
   const mb = bytes / (1024 * 1024);
 
@@ -185,16 +190,22 @@ function formatSize(bytes) {
   return `${mb.toFixed(1)}MB`;
 }
 
-// Approximate audio size
+// ======================================================
+// SIZE ESTIMATION
+// ======================================================
+
 function estimateAudioSize(durationSeconds, bitrate) {
-  if (!durationSeconds) return 0;
+  if (!durationSeconds || durationSeconds <= 0) {
+    return 0;
+  }
 
   return durationSeconds * (bitrate * 1000 / 8);
 }
 
-// Approximate video size
 function estimateVideoSize(durationSeconds, bitrateMbps) {
-  if (!durationSeconds) return 0;
+  if (!durationSeconds || durationSeconds <= 0) {
+    return 0;
+  }
 
   return (
     durationSeconds *
@@ -206,39 +217,23 @@ function estimateVideoSize(durationSeconds, bitrateMbps) {
 }
 
 // ======================================================
-// SEARCH
+// SEARCH HELPERS
 // ======================================================
 
 function isUrl(text = "") {
-  return /^https?:\/\/\S+$/i.test(text.trim());
+  return /^https?:\/\/\S+$/i.test(
+    String(text).trim()
+  );
 }
 
 async function searchMedia(query) {
-  if (isUrl(query)) {
-    const result = await yts(query);
+  const cleanQuery = String(query || "").trim();
 
-    if (result?.videos?.length) {
-      const video = result.videos[0];
-
-      return {
-        url: video.url,
-        title: video.title || "Downloaded Media",
-        thumbnail: video.thumbnail || null,
-        durationSeconds: video.seconds || 0,
-        duration: video.timestamp || "Unknown"
-      };
-    }
-
-    return {
-      url: query,
-      title: "Downloaded Media",
-      thumbnail: null,
-      durationSeconds: 0,
-      duration: "Unknown"
-    };
+  if (!cleanQuery) {
+    throw new Error("Song name ya YouTube link provide karo.");
   }
 
-  const result = await yts(query);
+  const result = await yts(cleanQuery);
 
   if (
     !result ||
@@ -254,21 +249,32 @@ async function searchMedia(query) {
     url: video.url,
     title: video.title || "Downloaded Media",
     thumbnail: video.thumbnail || null,
-    durationSeconds: video.seconds || 0,
+    durationSeconds: Number(video.seconds) || 0,
     duration: video.timestamp || "Unknown"
   };
 }
 
 // ======================================================
-// SEND QUALITY MENU
+// QUALITY MENU
 // ======================================================
 
 async function sendQualityMenu(sock, message, media) {
   const duration = media.durationSeconds;
 
-  const audio144 = estimateAudioSize(duration, 144);
-  const audio256 = estimateAudioSize(duration, 256);
-  const video720 = estimateVideoSize(duration, 2.2);
+  const audio144 = estimateAudioSize(
+    duration,
+    144
+  );
+
+  const audio256 = estimateAudioSize(
+    duration,
+    256
+  );
+
+  const video720 = estimateVideoSize(
+    duration,
+    2.2
+  );
 
   const caption = `╭━━━〔 🎵 SHEIKH-MD MEDIA 〕━━━╮
 ┃
@@ -291,8 +297,8 @@ async function sendQualityMenu(sock, message, media) {
 ┃ Reply to this message
 ┃ with 1, 2 or 3.
 ┃
-┃ 🔁 Same menu can be
-┃ replied to multiple times.
+┃ 🔁 Same menu par multiple
+┃ times download kar sakte ho.
 ┃
 ┃ ⏳ Menu expires in 10 minutes.
 ┃
@@ -300,20 +306,37 @@ async function sendQualityMenu(sock, message, media) {
 
   let sentMessage;
 
-  if (media.thumbnail) {
-    sentMessage = await sock.sendMessage(
-      message.key.remoteJid,
-      {
-        image: {
-          url: media.thumbnail
+  try {
+    if (media.thumbnail) {
+      sentMessage = await sock.sendMessage(
+        message.key.remoteJid,
+        {
+          image: {
+            url: media.thumbnail
+          },
+          caption
         },
-        caption
-      },
-      {
-        quoted: message
-      }
+        {
+          quoted: message
+        }
+      );
+    } else {
+      sentMessage = await sock.sendMessage(
+        message.key.remoteJid,
+        {
+          text: caption
+        },
+        {
+          quoted: message
+        }
+      );
+    }
+  } catch (error) {
+    console.warn(
+      "⚠️ Thumbnail send failed, text menu send kar rahe hain:",
+      error?.message || error
     );
-  } else {
+
     sentMessage = await sock.sendMessage(
       message.key.remoteJid,
       {
@@ -332,6 +355,7 @@ async function sendQualityMenu(sock, message, media) {
       chatId: getChatId(message),
       url: media.url,
       title: media.title,
+      duration: media.duration,
       createdAt: Date.now()
     });
 
@@ -351,14 +375,22 @@ async function sendQualityMenu(sock, message, media) {
 // FIRST COMMAND: .song
 // ======================================================
 
-async function song({ sock, message, rawArgs, config }) {
+async function song({
+  sock,
+  message,
+  rawArgs,
+  config
+}) {
   const query = String(rawArgs || "").trim();
 
   if (!query) {
     return sendText(
       sock,
       message,
-      `❌ Usage: ${config.prefix}song <song name/link>\n\nExample:\n${config.prefix}song Tary Lia`
+      `❌ Usage: ${config.prefix}song <song name/link>
+
+Example:
+${config.prefix}song Tary Lia`
     );
   }
 
@@ -371,7 +403,11 @@ async function song({ sock, message, rawArgs, config }) {
 
     const media = await searchMedia(query);
 
-    return sendQualityMenu(sock, message, media);
+    return sendQualityMenu(
+      sock,
+      message,
+      media
+    );
   } catch (error) {
     console.error(
       "❌ Search error:",
@@ -381,7 +417,9 @@ async function song({ sock, message, rawArgs, config }) {
     return sendText(
       sock,
       message,
-      `❌ Song search failed.\n\nReason: ${
+      `❌ Song search failed.
+
+Reason: ${
         error?.message || "Unknown error"
       }`
     );
@@ -389,23 +427,50 @@ async function song({ sock, message, rawArgs, config }) {
 }
 
 // ======================================================
-// DOWNLOAD ERROR FORMATTER
+// ERROR HANDLING
 // ======================================================
 
 function getDownloadErrorText(error) {
-  return (
-    error?.stderr ||
-    error?.stdout ||
-    error?.message ||
-    error?.stack ||
-    "Unknown download error"
+  const parts = [
+    error?.stderr,
+    error?.stdout,
+    error?.message,
+    error?.stack
+  ]
+    .filter(Boolean)
+    .map((item) => String(item));
+
+  return parts.join("\n") || "Unknown download error";
+}
+
+function isYouTubeVerificationError(
+  errorText = ""
+) {
+  return /sign in to confirm|not a bot|challenge|verification|cookies|page needs to be reloaded|confirm you.re not a bot|http error 403|403 forbidden/i.test(
+    String(errorText)
   );
 }
 
-function isYouTubeVerificationError(errorText = "") {
-  return /sign in to confirm|not a bot|challenge|cookies|verification|page needs to be reloaded/i.test(
-    errorText
-  );
+function getFriendlyDownloadError(error) {
+  const errorText = getDownloadErrorText(error);
+
+  if (isYouTubeVerificationError(errorText)) {
+    return "YouTube verification/challenge pass nahi hua. Cookies invalid/expired ho sakti hain ya YouTube ne server request block ki hai.";
+  }
+
+  if (/ffmpeg|postprocessor/i.test(errorText)) {
+    return "FFmpeg processing mein problem aayi hai. Render build/dependency check karo.";
+  }
+
+  if (/timeout|timed out|socket/i.test(errorText)) {
+    return "Download timeout ho gaya. Dobara try karo ya chhoti video select karo.";
+  }
+
+  if (/file.*60|filesize/i.test(errorText)) {
+    return "File 60MB se zyada hai. Chhota media select karo.";
+  }
+
+  return "Download process mein error aaya hai.";
 }
 
 // ======================================================
@@ -441,7 +506,11 @@ async function downloadSelectedAudio({
 
         extractAudio: true,
         audioFormat: "mp3",
-        audioQuality: bitrate === 256 ? "0" : "5",
+
+        // 0 = best quality, 5 = good quality
+        audioQuality: bitrate === 256
+          ? "0"
+          : "5",
 
         ffmpegLocation: ffmpegPath,
         noPlaylist: true,
@@ -449,7 +518,7 @@ async function downloadSelectedAudio({
         retries: 2,
         socketTimeout: 30000,
 
-        // Cookies + JavaScript challenge support
+        // YouTube cookies + JS challenge support
         ...ytOptions
       },
       {
@@ -462,7 +531,7 @@ async function downloadSelectedAudio({
       "audio.mp3"
     );
 
-    validateFile(finalPath);
+    const fileSize = validateFile(finalPath);
 
     await sock.sendMessage(
       message.key.remoteJid,
@@ -471,7 +540,9 @@ async function downloadSelectedAudio({
           url: finalPath
         },
         mimetype: "audio/mpeg",
-        fileName: `${safeFileName(selection.title)}.mp3`,
+        fileName: `${safeFileName(
+          selection.title
+        )}.mp3`,
         ptt: false
       },
       {
@@ -480,7 +551,7 @@ async function downloadSelectedAudio({
     );
 
     console.log(
-      `✅ MP3 ${bitrate}kbps sent: ${selection.title}`
+      `✅ MP3 ${bitrate}kbps sent: ${selection.title} (${formatSize(fileSize)})`
     );
   } catch (error) {
     const errorText = getDownloadErrorText(error);
@@ -490,17 +561,15 @@ async function downloadSelectedAudio({
       errorText
     );
 
-    const verificationMessage =
-      isYouTubeVerificationError(errorText)
-        ? "YouTube verification/challenge pass nahi hua. Cookies invalid/expired ho sakti hain ya YouTube ne server request block ki hai."
-        : "Download process mein error aaya hai.";
+    const friendlyError =
+      getFriendlyDownloadError(error);
 
     await sendText(
       sock,
       message,
       `❌ MP3 download failed.
 
-${verificationMessage}
+${friendlyError}
 
 🔗 Video link:
 ${selection.url}`
@@ -550,7 +619,7 @@ async function downloadSelectedVideo({
         retries: 2,
         socketTimeout: 30000,
 
-        // Cookies + JavaScript challenge support
+        // YouTube cookies + JS challenge support
         ...ytOptions
       },
       {
@@ -563,7 +632,7 @@ async function downloadSelectedVideo({
       "video.mp4"
     );
 
-    validateFile(finalPath);
+    const fileSize = validateFile(finalPath);
 
     await sock.sendMessage(
       message.key.remoteJid,
@@ -572,7 +641,9 @@ async function downloadSelectedVideo({
           url: finalPath
         },
         mimetype: "video/mp4",
-        fileName: `${safeFileName(selection.title)}.mp4`,
+        fileName: `${safeFileName(
+          selection.title
+        )}.mp4`,
         caption: `🎬 ${selection.title}`
       },
       {
@@ -581,7 +652,7 @@ async function downloadSelectedVideo({
     );
 
     console.log(
-      `✅ MP4 720p sent: ${selection.title}`
+      `✅ MP4 720p sent: ${selection.title} (${formatSize(fileSize)})`
     );
   } catch (error) {
     const errorText = getDownloadErrorText(error);
@@ -591,17 +662,15 @@ async function downloadSelectedVideo({
       errorText
     );
 
-    const verificationMessage =
-      isYouTubeVerificationError(errorText)
-        ? "YouTube verification/challenge pass nahi hua. Cookies invalid/expired ho sakti hain ya YouTube ne server request block ki hai."
-        : "Download process mein error aaya hai.";
+    const friendlyError =
+      getFriendlyDownloadError(error);
 
     await sendText(
       sock,
       message,
       `❌ MP4 download failed.
 
-${verificationMessage}
+${friendlyError}
 
 🔗 Video link:
 ${selection.url}`
@@ -616,7 +685,9 @@ ${selection.url}`
 // ======================================================
 
 async function handleSelection(sock, message) {
-  if (!message?.message) return false;
+  if (!message?.message) {
+    return false;
+  }
 
   const text = getMessageText(message);
 
@@ -630,21 +701,50 @@ async function handleSelection(sock, message) {
     return false;
   }
 
-  const selection = pendingSelections.get(quotedId);
+  const selection = pendingSelections.get(
+    quotedId
+  );
 
   if (!selection) {
     return false;
   }
 
+  // Ensure reply same chat ka ho
   if (
     selection.chatId !== getChatId(message)
   ) {
     return false;
   }
 
-  // IMPORTANT:
-  // Selection delete nahi kar rahe.
-  // Same menu par multiple replies allowed hain.
+  // Ensure menu expire na hua ho
+  const isExpired =
+    Date.now() - selection.createdAt >
+    SELECTION_EXPIRE_TIME;
+
+  if (isExpired) {
+    pendingSelections.delete(quotedId);
+
+    await sendText(
+      sock,
+      message,
+      "⌛ Ye download menu expire ho chuka hai. Dobara .song command use karo."
+    );
+
+    return true;
+  }
+
+  /*
+   * IMPORTANT:
+   * Yahan pendingSelections.delete(quotedId)
+   * jaan-boojh kar nahi lagaya gaya.
+   *
+   * Is wajah se same menu par:
+   * 1 -> MP3 144kbps
+   * 2 -> MP3 256kbps
+   * 3 -> MP4 720p
+   *
+   * multiple times reply kiya ja sakta hai.
+   */
 
   if (text === "1") {
     await downloadSelectedAudio({

@@ -1,14 +1,15 @@
-const http = require("http");
+/**
+ * SHEIKH-MD WhatsApp Bot
+ * QR + Pairing Code + Self Number Support
+ */
 
-const PORT = process.env.PORT || 3000;
-
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("SHEIKH-MD is alive and running!");
-}).listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Health server running on port ${PORT}`);
-});
 require("dotenv").config();
+
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const P = require("pino");
+const qrcode = require("qrcode-terminal");
 
 const {
   default: makeWASocket,
@@ -18,120 +19,322 @@ const {
   makeCacheableSignalKeyStore,
   Browsers
 } = require("@whiskeysockets/baileys");
+
 const { Boom } = require("@hapi/boom");
-const P = require("pino");
-const qrcode = require("qrcode-terminal");
-const readline = require("readline");
-const fs = require("fs");
-const path = require("path");
 
 const config = require("./config");
 const { handleMessage } = require("./lib/commandHandler");
 
-const SESSION_DIR = path.join(__dirname, "sessions", config.sessionName);
+// ======================================================
+// HEALTH SERVER - RENDER / HOSTING
+// ======================================================
+
+const PORT = process.env.PORT || 3000;
+
+http
+  .createServer((req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8"
+    });
+
+    res.end("SHEIKH-MD is alive and running! 🚀");
+  })
+  .listen(PORT, "0.0.0.0", () => {
+    console.log(`🌐 Health server running on port ${PORT}`);
+  });
+
+// ======================================================
+// SESSION CONFIGURATION
+// ======================================================
+
+const SESSION_DIR = path.join(
+  __dirname,
+  "sessions",
+  config.sessionName || "sheikh-md"
+);
+
+let isStarting = false;
+let reconnectTimer = null;
 let pairingRequested = false;
 
-function askQuestion(question) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
+// ======================================================
+// SAFE MESSAGE CHECK
+// ======================================================
 
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
+function isValidMessage(message) {
+  if (!message || !message.message) return false;
+
+  // Ignore protocol messages
+  if (message.key?.remoteJid === "status@broadcast") {
+    return false;
+  }
+
+  return true;
 }
+
+// ======================================================
+// START BOT
+// ======================================================
 
 async function startBot() {
-  fs.mkdirSync(SESSION_DIR, { recursive: true });
+  if (isStarting) {
+    console.log("⚠️ Bot is already starting...");
+    return;
+  }
 
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+  isStarting = true;
 
-  const logger = P({ level: config.logLevel });
+  try {
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
 
-  const sock = makeWASocket({
-    version,
-    logger,
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger)
-    },
-    browser: Browsers.ubuntu("Chrome"),
-    printQRInTerminal: false,
-    markOnlineOnConnect: false,
-    generateHighQualityLinkPreview: false,
-    syncFullHistory: false
-  });
+    const { state, saveCreds } = await useMultiFileAuthState(
+      SESSION_DIR
+    );
 
-  sock.ev.on("creds.update", saveCreds);
+    const { version } = await fetchLatestBaileysVersion();
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const logger = P({
+      level: config.logLevel || "silent"
+    });
 
-    if (qr && (config.connectionMethod === "qr" || config.connectionMethod === "both")) {
-      console.log("\nScan this QR code from WhatsApp > Linked devices:\n");
-      qrcode.generate(qr, { small: true });
-    }
+    const sock = makeWASocket({
+      version,
 
-    if (
-      !sock.authState?.creds?.registered &&
-      !pairingRequested &&
-      (config.connectionMethod === "pairing" || config.connectionMethod === "both") &&
-      config.pairingNumber &&
-      !qr
-    ) {
-      // Pairing is requested after a short delay to allow the socket to initialize.
-      pairingRequested = true;
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(config.pairingNumber);
-          console.log(`\nWhatsApp Pairing Code: ${code}`);
-          console.log("WhatsApp > Linked devices > Link a device > Link with phone number\n");
-        } catch (error) {
-          console.error("Pairing code error:", error.message);
+      logger,
+
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(
+          state.keys,
+          logger
+        )
+      },
+
+      browser: Browsers.ubuntu("Chrome"),
+
+      printQRInTerminal: false,
+
+      markOnlineOnConnect: false,
+
+      generateHighQualityLinkPreview: false,
+
+      syncFullHistory: false,
+
+      connectTimeoutMs: 60_000,
+
+      defaultQueryTimeoutMs: 60_000,
+
+      keepAliveIntervalMs: 25_000,
+
+      emitOwnEvents: true,
+
+      fireInitQueries: true
+    });
+
+    // ==================================================
+    // SAVE SESSION CREDENTIALS
+    // ==================================================
+
+    sock.ev.on("creds.update", saveCreds);
+
+    // ==================================================
+    // CONNECTION UPDATE
+    // ==================================================
+
+    sock.ev.on("connection.update", async (update) => {
+      const {
+        connection,
+        lastDisconnect,
+        qr
+      } = update;
+
+      // ----------------------------------------------
+      // QR CODE
+      // ----------------------------------------------
+
+      if (
+        qr &&
+        (
+          config.connectionMethod === "qr" ||
+          config.connectionMethod === "both"
+        )
+      ) {
+        console.log("\n📲 Scan this QR code:");
+        console.log(
+          "WhatsApp > Linked devices > Link a device\n"
+        );
+
+        qrcode.generate(qr, {
+          small: true
+        });
+      }
+
+      // ----------------------------------------------
+      // PAIRING CODE
+      // ----------------------------------------------
+
+      if (
+        !state.creds.registered &&
+        !pairingRequested &&
+        (
+          config.connectionMethod === "pairing" ||
+          config.connectionMethod === "both"
+        ) &&
+        config.pairingNumber
+      ) {
+        pairingRequested = true;
+
+        // Pairing code request after socket initialization
+        setTimeout(async () => {
+          try {
+            const phoneNumber = String(config.pairingNumber)
+              .replace(/\D/g, "");
+
+            if (!phoneNumber) {
+              console.log(
+                "❌ Invalid pairing number in config.js"
+              );
+              return;
+            }
+
+            const pairingCode = await sock.requestPairingCode(
+              phoneNumber
+            );
+
+            console.log("\n======================================");
+            console.log("📱 WhatsApp Pairing Code:");
+            console.log(`🔐 ${pairingCode}`);
+            console.log("======================================");
+            console.log(
+              "WhatsApp > Linked devices > Link a device > Link with phone number\n"
+            );
+          } catch (error) {
+            console.error(
+              "❌ Pairing code error:",
+              error?.message || error
+            );
+
+            pairingRequested = false;
+          }
+        }, 5000);
+      }
+
+      // ----------------------------------------------
+      // CONNECTED
+      // ----------------------------------------------
+
+      if (connection === "open") {
+        isStarting = false;
+        pairingRequested = true;
+
+        console.log("\n======================================");
+        console.log("✅ SHEIKH-MD connected successfully!");
+        console.log(`🤖 Bot: ${config.botName || "SHEIKH-MD"}`);
+        console.log(`⚡ Prefix: ${config.prefix || "."}`);
+        console.log(`🌍 Mode: ${config.botMode || "public"}`);
+        console.log("💬 Self-number commands: ENABLED");
+        console.log("======================================\n");
+      }
+
+      // ----------------------------------------------
+      // CONNECTION CLOSED
+      // ----------------------------------------------
+
+      if (connection === "close") {
+        isStarting = false;
+
+        const statusCode = new Boom(
+          lastDisconnect?.error
+        )?.output?.statusCode;
+
+        const loggedOut =
+          statusCode === DisconnectReason.loggedOut;
+
+        const connectionReplaced =
+          statusCode === DisconnectReason.connectionReplaced;
+
+        console.log(
+          `⚠️ Connection closed: ${
+            statusCode || "unknown"
+          }`
+        );
+
+        if (loggedOut || connectionReplaced) {
+          console.log(
+            "❌ Session logged out or replaced."
+          );
+
+          console.log(
+            "Delete the sessions folder and pair again."
+          );
+
+          return;
         }
-      }, 3000);
-    }
 
-    if (connection === "open") {
-      console.log(`\n✅ ${config.botName} connected successfully.`);
-      console.log(`Prefix: ${config.prefix}`);
-      console.log(`Mode: ${config.botMode}\n`);
-    }
+        if (!reconnectTimer) {
+          console.log("🔄 Reconnecting in 5 seconds...");
 
-    if (connection === "close") {
-      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-      console.log("Connection closed:", statusCode || "unknown");
-
-      if (shouldReconnect) {
-        pairingRequested = false;
-        setTimeout(startBot, 5000);
-      } else {
-        console.log("Logged out. Delete the sessions folder and restart to pair again.");
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            pairingRequested = false;
+            startBot().catch(console.error);
+          }, 5000);
+        }
       }
-    }
-  });
+    });
 
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
+    // ==================================================
+    // MESSAGE HANDLER
+    // ==================================================
 
-    for (const message of messages) {
-      try {
-        await handleMessage(sock, message);
-      } catch (error) {
-        console.error("Message handling error:", error);
+    sock.ev.on(
+      "messages.upsert",
+      async ({ messages, type }) => {
+        if (type !== "notify") return;
+
+        for (const message of messages) {
+          try {
+            if (!isValidMessage(message)) continue;
+
+            /*
+             * Self-number support:
+             * fromMe messages are intentionally NOT ignored here.
+             *
+             * commandHandler.js must also allow message.key.fromMe.
+             */
+
+            await handleMessage(sock, message, {
+              allowSelf: true
+            });
+          } catch (error) {
+            console.error(
+              "❌ Message handling error:",
+              error?.message || error
+            );
+          }
+        }
       }
-    }
-  });
+    );
+
+  } catch (error) {
+    isStarting = false;
+
+    console.error(
+      "❌ Fatal startup error:",
+      error?.message || error
+    );
+
+    setTimeout(() => {
+      startBot().catch(console.error);
+    }, 5000);
+  }
 }
 
+// ======================================================
+// START APPLICATION
+// ======================================================
+
 startBot().catch((error) => {
-  console.error("Fatal startup error:", error);
+  console.error("❌ Startup failed:", error);
   process.exit(1);
 });

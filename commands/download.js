@@ -24,10 +24,18 @@ const COOKIES_PATH =
 const pendingSelections = new Map();
 
 // ======================================================
-// COOKIE CHECK
+// YOUTUBE DOWNLOAD OPTIONS
 // ======================================================
 
-function getCookiesOptions() {
+function getYtDlpOptions() {
+  const options = {
+    // JavaScript runtime for YouTube challenge solving
+    jsRuntimes: "node",
+
+    // yt-dlp EJS challenge scripts
+    remoteComponents: "ejs:github"
+  };
+
   try {
     if (fs.existsSync(COOKIES_PATH)) {
       const stats = fs.statSync(COOKIES_PATH);
@@ -37,12 +45,10 @@ function getCookiesOptions() {
           `🍪 YouTube cookies loaded: ${COOKIES_PATH}`
         );
 
-        return {
-          cookies: COOKIES_PATH
-        };
+        options.cookies = COOKIES_PATH;
+      } else {
+        console.warn("⚠️ Cookies file empty hai.");
       }
-
-      console.warn("⚠️ Cookies file empty hai.");
     } else {
       console.warn(
         `⚠️ Cookies file nahi mili: ${COOKIES_PATH}`
@@ -55,7 +61,7 @@ function getCookiesOptions() {
     );
   }
 
-  return {};
+  return options;
 }
 
 // ======================================================
@@ -285,6 +291,11 @@ async function sendQualityMenu(sock, message, media) {
 ┃ Reply to this message
 ┃ with 1, 2 or 3.
 ┃
+┃ 🔁 Same menu can be
+┃ replied to multiple times.
+┃
+┃ ⏳ Menu expires in 10 minutes.
+┃
 ╰━━━━━━━━━━━━━━━━━━╯`;
 
   let sentMessage;
@@ -326,6 +337,10 @@ async function sendQualityMenu(sock, message, media) {
 
     setTimeout(() => {
       pendingSelections.delete(menuMessageId);
+
+      console.log(
+        `⌛ Media selection expired: ${menuMessageId}`
+      );
     }, SELECTION_EXPIRE_TIME);
   }
 
@@ -374,6 +389,26 @@ async function song({ sock, message, rawArgs, config }) {
 }
 
 // ======================================================
+// DOWNLOAD ERROR FORMATTER
+// ======================================================
+
+function getDownloadErrorText(error) {
+  return (
+    error?.stderr ||
+    error?.stdout ||
+    error?.message ||
+    error?.stack ||
+    "Unknown download error"
+  );
+}
+
+function isYouTubeVerificationError(errorText = "") {
+  return /sign in to confirm|not a bot|challenge|cookies|verification|page needs to be reloaded/i.test(
+    errorText
+  );
+}
+
+// ======================================================
 // DOWNLOAD SELECTED AUDIO
 // ======================================================
 
@@ -397,7 +432,7 @@ async function downloadSelectedAudio({
       `⏳ MP3 ${bitrate}kbps download ho raha hai...`
     );
 
-    const cookieOptions = getCookiesOptions();
+    const ytOptions = getYtDlpOptions();
 
     await ytDlp(
       selection.url,
@@ -406,8 +441,6 @@ async function downloadSelectedAudio({
 
         extractAudio: true,
         audioFormat: "mp3",
-
-        // Better quality setting
         audioQuality: bitrate === 256 ? "0" : "5",
 
         ffmpegLocation: ffmpegPath,
@@ -416,7 +449,8 @@ async function downloadSelectedAudio({
         retries: 2,
         socketTimeout: 30000,
 
-        ...cookieOptions
+        // Cookies + JavaScript challenge support
+        ...ytOptions
       },
       {
         timeout: DOWNLOAD_TIMEOUT
@@ -449,20 +483,24 @@ async function downloadSelectedAudio({
       `✅ MP3 ${bitrate}kbps sent: ${selection.title}`
     );
   } catch (error) {
+    const errorText = getDownloadErrorText(error);
+
     console.error(
       "❌ Audio download error:",
-      error?.stderr ||
-        error?.stdout ||
-        error?.stack ||
-        error
+      errorText
     );
+
+    const verificationMessage =
+      isYouTubeVerificationError(errorText)
+        ? "YouTube verification/challenge pass nahi hua. Cookies invalid/expired ho sakti hain ya YouTube ne server request block ki hai."
+        : "Download process mein error aaya hai.";
 
     await sendText(
       sock,
       message,
       `❌ MP3 download failed.
 
-YouTube ne download request block ki hai ya cookies invalid/expired hain.
+${verificationMessage}
 
 🔗 Video link:
 ${selection.url}`
@@ -495,7 +533,7 @@ async function downloadSelectedVideo({
       "⏳ MP4 720p download ho raha hai..."
     );
 
-    const cookieOptions = getCookiesOptions();
+    const ytOptions = getYtDlpOptions();
 
     await ytDlp(
       selection.url,
@@ -503,7 +541,7 @@ async function downloadSelectedVideo({
         output: outputPath,
 
         format:
-          "bv*[height<=720]+ba/b[height<=720]",
+          "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]",
 
         mergeOutputFormat: "mp4",
         ffmpegLocation: ffmpegPath,
@@ -512,7 +550,8 @@ async function downloadSelectedVideo({
         retries: 2,
         socketTimeout: 30000,
 
-        ...cookieOptions
+        // Cookies + JavaScript challenge support
+        ...ytOptions
       },
       {
         timeout: DOWNLOAD_TIMEOUT
@@ -545,20 +584,24 @@ async function downloadSelectedVideo({
       `✅ MP4 720p sent: ${selection.title}`
     );
   } catch (error) {
+    const errorText = getDownloadErrorText(error);
+
     console.error(
       "❌ Video download error:",
-      error?.stderr ||
-        error?.stdout ||
-        error?.stack ||
-        error
+      errorText
     );
+
+    const verificationMessage =
+      isYouTubeVerificationError(errorText)
+        ? "YouTube verification/challenge pass nahi hua. Cookies invalid/expired ho sakti hain ya YouTube ne server request block ki hai."
+        : "Download process mein error aaya hai.";
 
     await sendText(
       sock,
       message,
       `❌ MP4 download failed.
 
-YouTube ne download request block ki hai ya cookies invalid/expired hain.
+${verificationMessage}
 
 🔗 Video link:
 ${selection.url}`
@@ -599,7 +642,9 @@ async function handleSelection(sock, message) {
     return false;
   }
 
-  pendingSelections.delete(quotedId);
+  // IMPORTANT:
+  // Selection delete nahi kar rahe.
+  // Same menu par multiple replies allowed hain.
 
   if (text === "1") {
     await downloadSelectedAudio({

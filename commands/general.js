@@ -1,6 +1,12 @@
 const os = require("os");
+
 const config = require("../config");
-const { formatRuntime, getUptime, memoryUsage, getChatId } = require("../lib/helpers");
+const {
+  formatRuntime,
+  getUptime,
+  memoryUsage,
+  getChatId
+} = require("../lib/helpers");
 
 const menuText = (prefix) => `╭━━━〔 ${config.botName} 〕━━━╮
 ┃
@@ -30,14 +36,30 @@ const menuText = (prefix) => `╭━━━〔 ${config.botName} 〕━━━╮
 ┃ ${prefix}promote @user
 ┃ ${prefix}demote @user
 ┃
+┣━━〔 MEDIA DOWNLOADER 〕
+┃ ${prefix}song <name/link>
+┃ ${prefix}mp3 <name/link>
+┃ ${prefix}video <name/link>
+┃ ${prefix}mp4 <name/link>
+┃
 ┣━━〔 TOOLS 〕
 ┃ ${prefix}sticker (reply to image)
-┃ ${prefix}ai <question>
 ┃
 ╰━━━━━━━━━━━━━━━━━━╯`;
 
 async function reply(sock, message, text, options = {}) {
-  return sock.sendMessage(message.key.remoteJid, { text, ...options }, { quoted: message });
+  const jid = message.key.remoteJid;
+
+  return sock.sendMessage(
+    jid,
+    {
+      text,
+      ...options
+    },
+    {
+      quoted: message
+    }
+  );
 }
 
 async function menu({ sock, message, config }) {
@@ -50,30 +72,69 @@ async function help(ctx) {
 
 async function ping({ sock, message }) {
   const start = Date.now();
+
   await reply(sock, message, "Testing response...");
+
   const ms = Date.now() - start;
+
   return reply(sock, message, `🏓 Pong: ${ms}ms`);
 }
 
 async function alive({ sock, message, config }) {
-  return reply(sock, message, `✅ ${config.botName} is online.\n\nUse ${config.prefix}menu for commands.`);
+  return reply(
+    sock,
+    message,
+    `✅ ${config.botName} is online.\n\nUse ${config.prefix}menu for commands.`
+  );
 }
 
 async function runtime({ sock, message }) {
-  return reply(sock, message, `⏱ Runtime: ${formatRuntime(getUptime())}\n💾 RAM: ${memoryUsage()}\n🖥 Platform: ${os.platform()}`);
+  return reply(
+    sock,
+    message,
+    `⏱ Runtime: ${formatRuntime(getUptime())}\n💾 RAM: ${memoryUsage()}\n🖥 Platform: ${os.platform()}`
+  );
 }
 
 async function owner({ sock, message, config }) {
-  return reply(sock, message, `👑 Owner: ${config.ownerName}\n📞 Number: ${config.ownerNumber || "Not configured"}`);
+  return reply(
+    sock,
+    message,
+    `👑 Owner: ${config.ownerName}\n📞 Number: ${
+      config.ownerNumber || "Not configured"
+    }`
+  );
 }
 
 async function botinfo({ sock, message, config }) {
-  return reply(sock, message, `🤖 Bot: ${config.botName}\n⚙️ Prefix: ${config.prefix}\n🌐 Mode: ${config.botMode}\n📍 Chat: ${getChatId(message)}`);
+  return reply(
+    sock,
+    message,
+    `🤖 Bot: ${config.botName}\n⚙️ Prefix: ${config.prefix}\n🌐 Mode: ${config.botMode}\n📍 Chat: ${getChatId(
+      message
+    )}`
+  );
 }
 
-async function echo({ sock, message, rawArgs }) {
-  if (!rawArgs) return reply(sock, message, "Usage: .echo your text");
+async function echo({ sock, message, rawArgs, config }) {
+  if (!rawArgs) {
+    return reply(
+      sock,
+      message,
+      `Usage: ${config.prefix}echo your text`
+    );
+  }
+
   return reply(sock, message, rawArgs);
 }
 
-module.exports = { menu, help, ping, alive, runtime, owner, botinfo, echo };
+module.exports = {
+  menu,
+  help,
+  ping,
+  alive,
+  runtime,
+  owner,
+  botinfo,
+  echo
+};

@@ -12,10 +12,13 @@ const ffmpegPath = require("ffmpeg-static");
 
 const MAX_FILE_SIZE = 60 * 1024 * 1024; // 60 MB
 const DOWNLOAD_TIMEOUT = 180000; // 3 minutes
-const MAX_TITLE_LENGTH = 60;
+const SELECTION_EXPIRE_TIME = 10 * 60 * 1000; // 10 minutes
+
+// Menu message ID => selected media information
+const pendingSelections = new Map();
 
 // ======================================================
-// TEMP DIRECTORY
+// TEMP FILE HELPERS
 // ======================================================
 
 function createTempDirectory() {
@@ -56,61 +59,32 @@ async function sendText(sock, message, text) {
   );
 }
 
-async function sendAudio(
-  sock,
-  message,
-  filePath,
-  title
-) {
-  return sock.sendMessage(
-    message.key.remoteJid,
-    {
-      audio: {
-        url: filePath
-      },
-      mimetype: "audio/mpeg",
-      fileName: `${safeFileName(title)}.mp3`,
-      ptt: false
-    },
-    {
-      quoted: message
-    }
+function getChatId(message) {
+  return message.key?.remoteJid || "";
+}
+
+function getQuotedMessageId(message) {
+  return (
+    message.message?.extendedTextMessage?.contextInfo
+      ?.stanzaId || ""
   );
 }
 
-async function sendVideo(
-  sock,
-  message,
-  filePath,
-  title
-) {
-  return sock.sendMessage(
-    message.key.remoteJid,
-    {
-      video: {
-        url: filePath
-      },
-      mimetype: "video/mp4",
-      fileName: `${safeFileName(title)}.mp4`,
-      caption: `🎬 ${title}`
-    },
-    {
-      quoted: message
-    }
-  );
+function getMessageText(message) {
+  const msg = message.message || {};
+
+  return (
+    msg.conversation ||
+    msg.extendedTextMessage?.text ||
+    msg.imageMessage?.caption ||
+    msg.videoMessage?.caption ||
+    ""
+  ).trim();
 }
 
 // ======================================================
 // FILE HELPERS
 // ======================================================
-
-function safeFileName(name = "media") {
-  return String(name)
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, MAX_TITLE_LENGTH) || "media";
-}
 
 function getFileSize(filePath) {
   try {
@@ -133,132 +107,302 @@ function validateFile(filePath) {
 
   if (size > MAX_FILE_SIZE) {
     throw new Error(
-      "File 60MB se zyada hai. Chhota media try karo."
+      "File 60MB se zyada hai. Chhota media select karo."
     );
   }
 
   return size;
 }
 
+function safeFileName(name = "media") {
+  return (
+    String(name)
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 60) || "media"
+  );
+}
+
+function formatSize(bytes) {
+  if (!bytes || bytes <= 0) return "Unknown";
+
+  const mb = bytes / (1024 * 1024);
+
+  if (mb < 1) {
+    return `${Math.round(bytes / 1024)}KB`;
+  }
+
+  return `${mb.toFixed(1)}MB`;
+}
+
+// Approximate audio size:
+// bitrate(kbps) × duration(seconds) ÷ 8
+function estimateAudioSize(durationSeconds, bitrate) {
+  if (!durationSeconds) return 0;
+
+  return durationSeconds * (bitrate * 1000 / 8);
+}
+
+// Approximate video size using average bitrate.
+// Actual size can differ depending on video.
+function estimateVideoSize(durationSeconds, bitrateMbps) {
+  if (!durationSeconds) return 0;
+
+  return durationSeconds * bitrateMbps * 1000 * 1000 / 8;
+}
+
 // ======================================================
-// URL / SEARCH
+// SEARCH
 // ======================================================
 
 function isUrl(text = "") {
   return /^https?:\/\/\S+$/i.test(text.trim());
 }
 
-async function resolveMedia(query) {
+async function searchMedia(query) {
   if (isUrl(query)) {
+    const result = await yts(query);
+
+    if (result?.videos?.length) {
+      const video = result.videos[0];
+
+      return {
+        url: video.url,
+        title: video.title || "Downloaded Media",
+        thumbnail: video.thumbnail || null,
+        durationSeconds: video.seconds || 0,
+        duration: video.timestamp || "Unknown"
+      };
+    }
+
     return {
-      url: query.trim(),
-      title: "Downloaded Media"
+      url: query,
+      title: "Downloaded Media",
+      thumbnail: null,
+      durationSeconds: 0,
+      duration: "Unknown"
     };
   }
 
-  const searchResult = await yts(query);
+  const result = await yts(query);
 
   if (
-    !searchResult ||
-    !Array.isArray(searchResult.videos) ||
-    searchResult.videos.length === 0
+    !result ||
+    !Array.isArray(result.videos) ||
+    result.videos.length === 0
   ) {
     throw new Error("Song/video nahi mila.");
   }
 
-  const firstResult = searchResult.videos[0];
+  const video = result.videos[0];
 
   return {
-    url: firstResult.url,
-    title: firstResult.title || "Downloaded Media"
+    url: video.url,
+    title: video.title || "Downloaded Media",
+    thumbnail: video.thumbnail || null,
+    durationSeconds: video.seconds || 0,
+    duration: video.timestamp || "Unknown"
   };
 }
 
 // ======================================================
-// COMMON YT-DLP OPTIONS
+// SEND QUALITY MENU
 // ======================================================
 
-function commonOptions(outputPath) {
-  return {
-    output: outputPath,
-    noPlaylist: true,
-    noWarnings: true,
-    quiet: true,
-    socketTimeout: 30000,
-    retries: 2,
-    ffmpegLocation: ffmpegPath
-  };
+async function sendQualityMenu(sock, message, media) {
+  const duration = media.durationSeconds;
+
+  const audio144 = estimateAudioSize(duration, 144);
+  const audio256 = estimateAudioSize(duration, 256);
+  const video720 = estimateVideoSize(duration, 2.2);
+
+  const caption = `╭━━━〔 🎵 SHEIKH-MD MEDIA 〕━━━╮
+┃
+┃ 🎶 Title: ${media.title}
+┃ ⏱ Duration: ${media.duration}
+┃
+┣━━〔 DOWNLOAD OPTIONS 〕
+┃
+┃ 1️⃣ MP3 144kbps
+┃    Approx Size: ${formatSize(audio144)}
+┃
+┃ 2️⃣ MP3 256kbps
+┃    Approx Size: ${formatSize(audio256)}
+┃
+┃ 3️⃣ MP4 720p
+┃    Approx Size: ${formatSize(video720)}
+┃
+┣━━━━━━━━━━━━━━━━━━
+┃
+┃ Reply to this message
+┃ with 1, 2 or 3.
+┃
+╰━━━━━━━━━━━━━━━━━━╯`;
+
+  let sentMessage;
+
+  if (media.thumbnail) {
+    sentMessage = await sock.sendMessage(
+      message.key.remoteJid,
+      {
+        image: {
+          url: media.thumbnail
+        },
+        caption
+      },
+      {
+        quoted: message
+      }
+    );
+  } else {
+    sentMessage = await sock.sendMessage(
+      message.key.remoteJid,
+      {
+        text: caption
+      },
+      {
+        quoted: message
+      }
+    );
+  }
+
+  const menuMessageId = sentMessage?.key?.id;
+
+  if (menuMessageId) {
+    pendingSelections.set(menuMessageId, {
+      chatId: getChatId(message),
+      url: media.url,
+      title: media.title,
+      createdAt: Date.now()
+    });
+
+    setTimeout(() => {
+      pendingSelections.delete(menuMessageId);
+    }, SELECTION_EXPIRE_TIME);
+  }
+
+  return sentMessage;
 }
 
 // ======================================================
-// MP3 / SONG
+// FIRST COMMAND: .song
 // ======================================================
 
-async function downloadAudio({
-  sock,
-  message,
-  rawArgs,
-  config
-}) {
+async function song({ sock, message, rawArgs, config }) {
   const query = String(rawArgs || "").trim();
 
   if (!query) {
     return sendText(
       sock,
       message,
-      `❌ Usage: ${config.prefix}song <song name/link>\n\nExample:\n${config.prefix}song Believer Imagine Dragons`
+      `❌ Usage: ${config.prefix}song <song name/link>\n\nExample:\n${config.prefix}song Tary Lia`
     );
   }
-
-  const tempDir = createTempDirectory();
-  const outputPath = path.join(tempDir, "audio.%(ext)s");
 
   try {
     await sendText(
       sock,
       message,
-      "⏳ Song search/download ho raha hai...\nPlease wait."
+      "🔎 Song search ho raha hai..."
     );
 
-    const media = await resolveMedia(query);
+    const media = await searchMedia(query);
+
+    return sendQualityMenu(sock, message, media);
+  } catch (error) {
+    console.error(
+      "❌ Search error:",
+      error?.stack || error
+    );
+
+    return sendText(
+      sock,
+      message,
+      `❌ Song search failed.\n\nReason: ${
+        error?.message || "Unknown error"
+      }`
+    );
+  }
+}
+
+// ======================================================
+// DOWNLOAD SELECTED AUDIO
+// ======================================================
+
+async function downloadSelectedAudio({
+  sock,
+  message,
+  selection,
+  bitrate
+}) {
+  const tempDir = createTempDirectory();
+  const outputPath = path.join(
+    tempDir,
+    "audio.%(ext)s"
+  );
+
+  try {
+    await sendText(
+      sock,
+      message,
+      `⏳ MP3 ${bitrate}kbps download ho raha hai...`
+    );
 
     await ytDlp(
-      media.url,
+      selection.url,
       {
-        ...commonOptions(outputPath),
+        output: outputPath,
         extractAudio: true,
         audioFormat: "mp3",
-        audioQuality: "5"
+        audioQuality: bitrate === 256 ? "0" : "5",
+        ffmpegLocation: ffmpegPath,
+        noPlaylist: true,
+        noWarnings: true,
+        quiet: true,
+        retries: 2,
+        socketTimeout: 30000
       },
       {
         timeout: DOWNLOAD_TIMEOUT
       }
     );
 
-    const finalAudioPath = path.join(tempDir, "audio.mp3");
-
-    validateFile(finalAudioPath);
-
-    await sendAudio(
-      sock,
-      message,
-      finalAudioPath,
-      media.title
+    const finalPath = path.join(
+      tempDir,
+      "audio.mp3"
     );
 
-    console.log(`✅ MP3 sent: ${media.title}`);
+    validateFile(finalPath);
+
+    await sock.sendMessage(
+      message.key.remoteJid,
+      {
+        audio: {
+          url: finalPath
+        },
+        mimetype: "audio/mpeg",
+        fileName: `${safeFileName(selection.title)}.mp3`,
+        ptt: false
+      },
+      {
+        quoted: message
+      }
+    );
+
+    console.log(
+      `✅ MP3 ${bitrate}kbps sent: ${selection.title}`
+    );
   } catch (error) {
     console.error(
-      "❌ MP3 download error:",
+      "❌ Audio download error:",
       error?.stack || error
     );
 
     await sendText(
       sock,
       message,
-      `❌ MP3 download failed.\n\nReason: ${
-        error?.message || "Unknown error"
-      }`
+      `❌ MP3 download failed.\n\nYouTube ne download request block ki hai ya format available nahi hai.`
     );
   } finally {
     cleanDirectory(tempDir);
@@ -266,78 +410,153 @@ async function downloadAudio({
 }
 
 // ======================================================
-// MP4 / VIDEO
+// DOWNLOAD SELECTED VIDEO
 // ======================================================
 
-async function downloadVideo({
+async function downloadSelectedVideo({
   sock,
   message,
-  rawArgs,
-  config
+  selection
 }) {
-  const query = String(rawArgs || "").trim();
-
-  if (!query) {
-    return sendText(
-      sock,
-      message,
-      `❌ Usage: ${config.prefix}video <video name/link>\n\nExample:\n${config.prefix}video funny cat video`
-    );
-  }
-
   const tempDir = createTempDirectory();
-  const outputPath = path.join(tempDir, "video.%(ext)s");
+  const outputPath = path.join(
+    tempDir,
+    "video.%(ext)s"
+  );
 
   try {
     await sendText(
       sock,
       message,
-      "⏳ Video search/download ho raha hai...\nPlease wait."
+      "⏳ MP4 720p download ho raha hai..."
     );
 
-    const media = await resolveMedia(query);
-
     await ytDlp(
-      media.url,
+      selection.url,
       {
-        ...commonOptions(outputPath),
+        output: outputPath,
         format:
-          "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b",
-        mergeOutputFormat: "mp4"
+          "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]",
+        mergeOutputFormat: "mp4",
+        ffmpegLocation: ffmpegPath,
+        noPlaylist: true,
+        noWarnings: true,
+        quiet: true,
+        retries: 2,
+        socketTimeout: 30000
       },
       {
         timeout: DOWNLOAD_TIMEOUT
       }
     );
 
-    const finalVideoPath = path.join(tempDir, "video.mp4");
-
-    validateFile(finalVideoPath);
-
-    await sendVideo(
-      sock,
-      message,
-      finalVideoPath,
-      media.title
+    const finalPath = path.join(
+      tempDir,
+      "video.mp4"
     );
 
-    console.log(`✅ MP4 sent: ${media.title}`);
+    validateFile(finalPath);
+
+    await sock.sendMessage(
+      message.key.remoteJid,
+      {
+        video: {
+          url: finalPath
+        },
+        mimetype: "video/mp4",
+        fileName: `${safeFileName(selection.title)}.mp4`,
+        caption: `🎬 ${selection.title}`
+      },
+      {
+        quoted: message
+      }
+    );
+
+    console.log(
+      `✅ MP4 720p sent: ${selection.title}`
+    );
   } catch (error) {
     console.error(
-      "❌ MP4 download error:",
+      "❌ Video download error:",
       error?.stack || error
     );
 
     await sendText(
       sock,
       message,
-      `❌ MP4 download failed.\n\nReason: ${
-        error?.message || "Unknown error"
-      }`
+      "❌ MP4 download failed.\n\nYouTube ne download request block ki hai ya video format available nahi hai."
     );
   } finally {
     cleanDirectory(tempDir);
   }
+}
+
+// ======================================================
+// HANDLE REPLY: 1 / 2 / 3
+// ======================================================
+
+async function handleSelection(sock, message) {
+  if (!message?.message) return false;
+
+  const text = getMessageText(message);
+
+  if (!["1", "2", "3"].includes(text)) {
+    return false;
+  }
+
+  const quotedId = getQuotedMessageId(message);
+
+  if (!quotedId) {
+    return false;
+  }
+
+  const selection = pendingSelections.get(quotedId);
+
+  if (!selection) {
+    return false;
+  }
+
+  if (
+    selection.chatId !== getChatId(message)
+  ) {
+    return false;
+  }
+
+  pendingSelections.delete(quotedId);
+
+  if (text === "1") {
+    await downloadSelectedAudio({
+      sock,
+      message,
+      selection,
+      bitrate: 144
+    });
+
+    return true;
+  }
+
+  if (text === "2") {
+    await downloadSelectedAudio({
+      sock,
+      message,
+      selection,
+      bitrate: 256
+    });
+
+    return true;
+  }
+
+  if (text === "3") {
+    await downloadSelectedVideo({
+      sock,
+      message,
+      selection
+    });
+
+    return true;
+  }
+
+  return false;
 }
 
 // ======================================================
@@ -345,8 +564,9 @@ async function downloadVideo({
 // ======================================================
 
 module.exports = {
-  song: downloadAudio,
-  mp3: downloadAudio,
-  video: downloadVideo,
-  mp4: downloadVideo
+  song,
+  mp3: song,
+  video: song,
+  mp4: song,
+  handleSelection
 };

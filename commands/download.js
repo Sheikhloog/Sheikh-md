@@ -26,38 +26,58 @@ const pendingSelections = new Map();
 // YT-DLP OPTIONS
 // ======================================================
 
-function getYtDlpOptions() {
+function getYtDlpOptions(tempDir) {
   const options = {
     // YouTube JavaScript challenge solving
     jsRuntimes: "node",
 
-    // Download EJS challenge scripts
+    // yt-dlp EJS challenge scripts
     remoteComponents: "ejs:github"
   };
 
   try {
-    if (fs.existsSync(COOKIES_PATH)) {
-      const stats = fs.statSync(COOKIES_PATH);
-
-      if (stats.isFile() && stats.size > 0) {
-        console.log(
-          `🍪 YouTube cookies loaded: ${COOKIES_PATH}`
-        );
-
-        options.cookies = COOKIES_PATH;
-      } else {
-        console.warn(
-          "⚠️ YouTube cookies file empty ya invalid hai."
-        );
-      }
-    } else {
+    if (!fs.existsSync(COOKIES_PATH)) {
       console.warn(
         `⚠️ YouTube cookies file nahi mili: ${COOKIES_PATH}`
       );
+
+      return options;
     }
+
+    const stats = fs.statSync(COOKIES_PATH);
+
+    if (!stats.isFile() || stats.size <= 0) {
+      console.warn(
+        "⚠️ YouTube cookies file empty ya invalid hai."
+      );
+
+      return options;
+    }
+
+    /*
+     * Render Secret Files read-only hoti hain.
+     * Isliye cookies ko writable temporary directory
+     * mein copy karke yt-dlp ko copied file denge.
+     */
+
+    const writableCookiesPath = path.join(
+      tempDir,
+      "cookies.txt"
+    );
+
+    fs.copyFileSync(
+      COOKIES_PATH,
+      writableCookiesPath
+    );
+
+    console.log(
+      `🍪 Cookies copied to writable path: ${writableCookiesPath}`
+    );
+
+    options.cookies = writableCookiesPath;
   } catch (error) {
     console.warn(
-      "⚠️ Cookies check failed:",
+      "⚠️ Cookies copy failed:",
       error?.message || error
     );
   }
@@ -220,17 +240,13 @@ function estimateVideoSize(durationSeconds, bitrateMbps) {
 // SEARCH HELPERS
 // ======================================================
 
-function isUrl(text = "") {
-  return /^https?:\/\/\S+$/i.test(
-    String(text).trim()
-  );
-}
-
 async function searchMedia(query) {
   const cleanQuery = String(query || "").trim();
 
   if (!cleanQuery) {
-    throw new Error("Song name ya YouTube link provide karo.");
+    throw new Error(
+      "Song name ya YouTube link provide karo."
+    );
   }
 
   const result = await yts(cleanQuery);
@@ -446,13 +462,17 @@ function getDownloadErrorText(error) {
 function isYouTubeVerificationError(
   errorText = ""
 ) {
-  return /sign in to confirm|not a bot|challenge|verification|cookies|page needs to be reloaded|confirm you.re not a bot|http error 403|403 forbidden/i.test(
+  return /sign in to confirm|not a bot|challenge|verification|cookies|page needs to be reloaded|confirm you.re not a bot|http error 403|403 forbidden|read-only file system/i.test(
     String(errorText)
   );
 }
 
 function getFriendlyDownloadError(error) {
   const errorText = getDownloadErrorText(error);
+
+  if (/read-only file system/i.test(errorText)) {
+    return "Cookies file read-only thi. Temporary writable cookies fix apply nahi hui ya old code deploy hai.";
+  }
 
   if (isYouTubeVerificationError(errorText)) {
     return "YouTube verification/challenge pass nahi hua. Cookies invalid/expired ho sakti hain ya YouTube ne server request block ki hai.";
@@ -497,7 +517,8 @@ async function downloadSelectedAudio({
       `⏳ MP3 ${bitrate}kbps download ho raha hai...`
     );
 
-    const ytOptions = getYtDlpOptions();
+    // IMPORTANT: tempDir pass karna zaroori hai
+    const ytOptions = getYtDlpOptions(tempDir);
 
     await ytDlp(
       selection.url,
@@ -518,7 +539,7 @@ async function downloadSelectedAudio({
         retries: 2,
         socketTimeout: 30000,
 
-        // YouTube cookies + JS challenge support
+        // Cookies + JS challenge support
         ...ytOptions
       },
       {
@@ -602,7 +623,8 @@ async function downloadSelectedVideo({
       "⏳ MP4 720p download ho raha hai..."
     );
 
-    const ytOptions = getYtDlpOptions();
+    // IMPORTANT: tempDir pass karna zaroori hai
+    const ytOptions = getYtDlpOptions(tempDir);
 
     await ytDlp(
       selection.url,
@@ -619,7 +641,7 @@ async function downloadSelectedVideo({
         retries: 2,
         socketTimeout: 30000,
 
-        // YouTube cookies + JS challenge support
+        // Cookies + JS challenge support
         ...ytOptions
       },
       {
@@ -735,15 +757,12 @@ async function handleSelection(sock, message) {
 
   /*
    * IMPORTANT:
-   * Yahan pendingSelections.delete(quotedId)
-   * jaan-boojh kar nahi lagaya gaya.
+   * pendingSelections.delete(quotedId) nahi lagana.
    *
-   * Is wajah se same menu par:
-   * 1 -> MP3 144kbps
-   * 2 -> MP3 256kbps
-   * 3 -> MP4 720p
-   *
-   * multiple times reply kiya ja sakta hai.
+   * Is se same menu par multiple replies possible hain:
+   * 1 = MP3 144kbps
+   * 2 = MP3 256kbps
+   * 3 = MP4 720p
    */
 
   if (text === "1") {

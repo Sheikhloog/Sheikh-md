@@ -1,7 +1,7 @@
 /**
  * SHEIKH-MD WhatsApp Bot
  * QR + Pairing Code + Self Number Support
- * Session ID + SUDO Environment Support
+ * Custom Session Directory + SUDO Environment Support
  */
 
 "use strict";
@@ -28,68 +28,136 @@ const { Boom } = require("@hapi/boom");
 const config = require("./config");
 const { handleMessage } = require("./lib/commandHandler");
 
-// ======================================================
-// HEALTH SERVER
-// ======================================================
+/* ======================================================
+   ENVIRONMENT CONFIGURATION
+====================================================== */
 
-const PORT = Number(process.env.PORT || 3000);
-
-const healthServer = http.createServer((req, res) => {
-  res.writeHead(200, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store"
-  });
-
-  res.end(
-    JSON.stringify({
-      status: "ok",
-      bot: config.botName || "SHEIKH-MD",
-      service: "SHEIKH-MD WhatsApp Bot",
-      uptime: Math.floor(process.uptime()),
-      timestamp: new Date().toISOString()
-    })
-  );
-});
-
-healthServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Health server running on port ${PORT}`);
-});
-
-// ======================================================
-// SESSION CONFIGURATION
-// ======================================================
-
-const SESSION_NAME =
-  process.env.SESSION_NAME ||
-  config.sessionName ||
-  "sheikh-md";
-
-const SESSION_DIR = path.join(
-  __dirname,
-  "sessions",
-  SESSION_NAME
+const PORT = Number(
+  process.env.PORT || 3000
 );
 
-// Session ID is received from environment.
-// Actual serialized-session decoding will be added
-// through the session importer in the next stage.
-const SESSION_ID =
-  String(process.env.SESSION_ID || "").trim();
+const SESSION_NAME =
+  String(
+    process.env.SESSION_NAME ||
+      config.sessionName ||
+      "sheikh-md"
+  ).trim();
+
+/*
+  SESSION_DIR priority:
+
+  1. SESSION_DIR from environment
+  2. ./sessions/SESSION_NAME
+
+  Example:
+  SESSION_DIR=./sessions/sheikh-md
+*/
+
+const SESSION_DIR = path.resolve(
+  process.env.SESSION_DIR ||
+    path.join(
+      __dirname,
+      "sessions",
+      SESSION_NAME
+    )
+);
+
+const SESSION_ID = String(
+  process.env.SESSION_ID || ""
+).trim();
 
 const SUDO_NUMBER = String(
   process.env.SUDO ||
-  config.sudo ||
-  ""
+    config.sudo ||
+    ""
 ).replace(/\D/g, "");
+
+const CONNECTION_METHOD =
+  String(
+    process.env.CONNECTION_METHOD ||
+      config.connectionMethod ||
+      "both"
+  ).toLowerCase();
+
+const PAIRING_NUMBER = String(
+  process.env.PAIRING_NUMBER ||
+    config.pairingNumber ||
+    ""
+).replace(/\D/g, "");
+
+/* ======================================================
+   RUNTIME STATE
+====================================================== */
 
 let isStarting = false;
 let reconnectTimer = null;
 let currentSocket = null;
 let shuttingDown = false;
+let restartAttempts = 0;
 
-// ======================================================
-// HELPERS
-// ======================================================
+/* ======================================================
+   HEALTH SERVER
+====================================================== */
+
+const healthServer = http.createServer(
+  (req, res) => {
+    if (req.url === "/health" || req.url === "/") {
+      res.writeHead(200, {
+        "Content-Type":
+          "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      });
+
+      return res.end(
+        JSON.stringify({
+          success: true,
+          status: "ok",
+          bot:
+            config.botName ||
+            "SHEIKH-MD",
+          service:
+            "SHEIKH-MD WhatsApp Bot",
+          sessionName: SESSION_NAME,
+          sessionId:
+            SESSION_ID || null,
+          sessionDirectory:
+            SESSION_DIR,
+          uptime: Math.floor(
+            process.uptime()
+          ),
+          timestamp:
+            new Date().toISOString()
+        })
+      );
+    }
+
+    res.writeHead(404, {
+      "Content-Type":
+        "application/json; charset=utf-8"
+    });
+
+    res.end(
+      JSON.stringify({
+        success: false,
+        message: "Route not found"
+      })
+    );
+  }
+);
+
+healthServer.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `🌐 Health server running on port ${PORT}`
+    );
+  }
+);
+
+/* ======================================================
+   HELPERS
+====================================================== */
 
 function normalizePhoneNumber(number) {
   return String(number || "")
@@ -102,7 +170,10 @@ function isValidMessage(message) {
     return false;
   }
 
-  if (message.key?.remoteJid === "status@broadcast") {
+  if (
+    message.key?.remoteJid ===
+    "status@broadcast"
+  ) {
     return false;
   }
 
@@ -111,35 +182,108 @@ function isValidMessage(message) {
 
 function getDisconnectCode(lastDisconnect) {
   try {
-    return new Boom(lastDisconnect?.error)
-      .output
-      .statusCode;
+    return new Boom(
+      lastDisconnect?.error
+    ).output.statusCode;
   } catch {
-    return 0;
+    return (
+      lastDisconnect?.error?.output
+        ?.statusCode ||
+      lastDisconnect?.error?.statusCode ||
+      0
+    );
+  }
+}
+
+function ensureSessionDirectory() {
+  try {
+    fs.mkdirSync(SESSION_DIR, {
+      recursive: true
+    });
+  } catch (error) {
+    console.error(
+      "❌ Unable to create session directory:",
+      error?.message || error
+    );
+
+    throw error;
   }
 }
 
 function printStartupInformation() {
-  console.log("\n======================================");
-  console.log("🚀 SHEIKH-MD STARTING");
-  console.log("======================================");
-  console.log(`🤖 Bot Name: ${config.botName || "SHEIKH-MD"}`);
-  console.log(`👤 Owner: ${config.ownerName || "Not set"}`);
-  console.log(`⚡ Prefix: ${config.prefix || "."}`);
-  console.log(`🌍 Mode: ${config.botMode || "public"}`);
-  console.log(`📁 Session: ${SESSION_NAME}`);
   console.log(
-    `🔐 Session ID: ${SESSION_ID ? "Provided" : "Not provided"}`
+    "\n======================================"
   );
   console.log(
-    `👑 SUDO: ${SUDO_NUMBER || "Not configured"}`
+    "🚀 SHEIKH-MD STARTING"
   );
   console.log(
-    `🔌 Connection Method: ${
-      config.connectionMethod || "both"
+    "======================================"
+  );
+
+  console.log(
+    `🤖 Bot Name: ${
+      config.botName || "SHEIKH-MD"
     }`
   );
-  console.log("======================================\n");
+
+  console.log(
+    `👤 Owner: ${
+      config.ownerName || "Not set"
+    }`
+  );
+
+  console.log(
+    `⚡ Prefix: ${
+      config.prefix || "."
+    }`
+  );
+
+  console.log(
+    `🌍 Mode: ${
+      config.botMode || "public"
+    }`
+  );
+
+  console.log(
+    `📁 Session Name: ${SESSION_NAME}`
+  );
+
+  console.log(
+    `📂 Session Directory: ${SESSION_DIR}`
+  );
+
+  console.log(
+    `🔐 Session ID: ${
+      SESSION_ID
+        ? "Provided"
+        : "Not provided"
+    }`
+  );
+
+  console.log(
+    `👑 SUDO: ${
+      SUDO_NUMBER || "Not configured"
+    }`
+  );
+
+  console.log(
+    `🔌 Connection Method: ${
+      CONNECTION_METHOD
+    }`
+  );
+
+  console.log(
+    `📱 Pairing Number: ${
+      PAIRING_NUMBER
+        ? "Configured"
+        : "Not configured"
+    }`
+  );
+
+  console.log(
+    "======================================\n"
+  );
 }
 
 function clearReconnectTimer() {
@@ -150,27 +294,58 @@ function clearReconnectTimer() {
 }
 
 function scheduleReconnect() {
-  if (shuttingDown || reconnectTimer) {
+  if (
+    shuttingDown ||
+    reconnectTimer
+  ) {
     return;
   }
 
-  console.log("🔄 Reconnecting in 5 seconds...");
+  restartAttempts += 1;
 
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
+  const delay = Math.min(
+    5000 * restartAttempts,
+    60000
+  );
 
-    startBot().catch((error) => {
-      console.error(
-        "❌ Reconnect error:",
-        error?.stack || error?.message || error
-      );
-    });
-  }, 5000);
+  console.log(
+    `🔄 Reconnecting in ${
+      Math.floor(delay / 1000)
+    } seconds...`
+  );
+
+  reconnectTimer = setTimeout(
+    async () => {
+      reconnectTimer = null;
+
+      try {
+        await startBot();
+      } catch (error) {
+        console.error(
+          "❌ Reconnect error:",
+          error?.stack ||
+            error?.message ||
+            error
+        );
+
+        scheduleReconnect();
+      }
+    },
+    delay
+  );
 }
 
-// ======================================================
-// START BOT
-// ======================================================
+function isConnectionMethodAllowed(method) {
+  return (
+    method === "qr" ||
+    method === "pairing" ||
+    method === "both"
+  );
+}
+
+/* ======================================================
+   START BOT
+====================================================== */
 
 async function startBot() {
   if (shuttingDown) {
@@ -178,33 +353,48 @@ async function startBot() {
   }
 
   if (isStarting) {
-    console.log("⚠️ Bot startup already in progress...");
+    console.log(
+      "⚠️ Bot startup already in progress..."
+    );
+
     return;
   }
 
   isStarting = true;
 
-  // Pairing must only be requested once per socket.
   let pairingRequested = false;
 
   try {
-    fs.mkdirSync(SESSION_DIR, {
-      recursive: true
-    });
-
+    ensureSessionDirectory();
     printStartupInformation();
 
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState(SESSION_DIR);
+    } = await useMultiFileAuthState(
+      SESSION_DIR
+    );
 
     const {
-      version
+      version,
+      isLatest
     } = await fetchLatestBaileysVersion();
 
+    console.log(
+      `📦 Baileys version: ${version.join(".")}`
+    );
+
+    console.log(
+      `📦 Latest version: ${
+        isLatest ? "Yes" : "No"
+      }`
+    );
+
     const logger = P({
-      level: config.logLevel || "silent"
+      level:
+        config.logLevel ||
+        process.env.LOG_LEVEL ||
+        "silent"
     });
 
     const sock = makeWASocket({
@@ -221,13 +411,16 @@ async function startBot() {
         )
       },
 
-      browser: Browsers.ubuntu("Chrome"),
+      browser: Browsers.ubuntu(
+        "Chrome"
+      ),
 
       printQRInTerminal: false,
 
       markOnlineOnConnect: false,
 
-      generateHighQualityLinkPreview: false,
+      generateHighQualityLinkPreview:
+        false,
 
       syncFullHistory: false,
 
@@ -244,24 +437,29 @@ async function startBot() {
 
     currentSocket = sock;
 
-    // ==================================================
-    // SAVE CREDENTIALS
-    // ==================================================
+    /* ==================================================
+       SAVE CREDENTIALS
+    ================================================== */
 
-    sock.ev.on("creds.update", async () => {
-      try {
-        await saveCreds();
-      } catch (error) {
-        console.error(
-          "❌ Failed to save credentials:",
-          error?.stack || error?.message || error
-        );
+    sock.ev.on(
+      "creds.update",
+      async () => {
+        try {
+          await saveCreds();
+        } catch (error) {
+          console.error(
+            "❌ Failed to save credentials:",
+            error?.stack ||
+              error?.message ||
+              error
+          );
+        }
       }
-    });
+    );
 
-    // ==================================================
-    // CONNECTION UPDATE
-    // ==================================================
+    /* ==================================================
+       CONNECTION UPDATE
+    ================================================== */
 
     sock.ev.on(
       "connection.update",
@@ -272,18 +470,21 @@ async function startBot() {
           qr
         } = update;
 
-        // ----------------------------------------------
-        // QR CODE
-        // ----------------------------------------------
+        /* ----------------------------------------------
+           QR CODE
+        ---------------------------------------------- */
 
         if (
           qr &&
           (
-            config.connectionMethod === "qr" ||
-            config.connectionMethod === "both"
+            CONNECTION_METHOD === "qr" ||
+            CONNECTION_METHOD === "both"
           )
         ) {
-          console.log("\n📲 QR code received.");
+          console.log(
+            "\n📲 QR code received."
+          );
+
           console.log(
             "WhatsApp > Settings > Linked devices > Link a device\n"
           );
@@ -293,28 +494,26 @@ async function startBot() {
           });
         }
 
-        // ----------------------------------------------
-        // PAIRING CODE
-        // ----------------------------------------------
+        /* ----------------------------------------------
+           PAIRING CODE
+        ---------------------------------------------- */
 
         if (
           connection === "connecting" &&
           !state.creds.registered &&
           !pairingRequested &&
           (
-            config.connectionMethod === "pairing" ||
-            config.connectionMethod === "both"
+            CONNECTION_METHOD === "pairing" ||
+            CONNECTION_METHOD === "both"
           )
         ) {
-          const phoneNumber = normalizePhoneNumber(
-            config.pairingNumber
-          );
-
-          if (!phoneNumber) {
+          if (!PAIRING_NUMBER) {
             console.error(
-              "❌ Invalid PAIRING_NUMBER in environment."
+              "❌ Pairing number is not configured."
             );
-          } else if (phoneNumber.length < 10) {
+          } else if (
+            PAIRING_NUMBER.length < 10
+          ) {
             console.error(
               "❌ Pairing number is too short."
             );
@@ -322,98 +521,142 @@ async function startBot() {
             pairingRequested = true;
 
             console.log(
-              `📱 Requesting pairing code for: ${phoneNumber}`
+              `📱 Requesting pairing code for: ${PAIRING_NUMBER}`
             );
 
-            // Wait for socket initialization.
-            setTimeout(async () => {
-              try {
-                if (state.creds.registered) {
+            setTimeout(
+              async () => {
+                try {
+                  if (
+                    state.creds.registered
+                  ) {
+                    console.log(
+                      "ℹ️ Session already registered. Pairing skipped."
+                    );
+
+                    return;
+                  }
+
+                  const pairingCode =
+                    await sock.requestPairingCode(
+                      PAIRING_NUMBER
+                    );
+
                   console.log(
-                    "ℹ️ Session already registered. Pairing skipped."
+                    "\n======================================"
                   );
-                  return;
+
+                  console.log(
+                    "📱 WHATSAPP PAIRING CODE"
+                  );
+
+                  console.log(
+                    `🔐 ${pairingCode}`
+                  );
+
+                  console.log(
+                    "======================================"
+                  );
+
+                  console.log(
+                    "WhatsApp > Linked devices > Link with phone number"
+                  );
+
+                  console.log(
+                    "Enter the latest code immediately.\n"
+                  );
+                } catch (error) {
+                  pairingRequested = false;
+
+                  console.error(
+                    "❌ Pairing code request failed:",
+                    error?.stack ||
+                      error?.message ||
+                      error
+                  );
                 }
-
-                const pairingCode =
-                  await sock.requestPairingCode(
-                    phoneNumber
-                  );
-
-                console.log(
-                  "\n======================================"
-                );
-                console.log("📱 WHATSAPP PAIRING CODE");
-                console.log(`🔐 ${pairingCode}`);
-                console.log(
-                  "======================================"
-                );
-                console.log(
-                  "WhatsApp > Linked devices > Link with phone number"
-                );
-                console.log(
-                  "Enter the latest code immediately.\n"
-                );
-              } catch (error) {
-                pairingRequested = false;
-
-                console.error(
-                  "❌ Pairing code request failed:",
-                  error?.stack || error?.message || error
-                );
-              }
-            }, 8000);
+              },
+              8000
+            );
           }
         }
 
-        // ----------------------------------------------
-        // CONNECTED
-        // ----------------------------------------------
+        /* ----------------------------------------------
+           CONNECTED
+        ---------------------------------------------- */
 
         if (connection === "open") {
           isStarting = false;
+          restartAttempts = 0;
           clearReconnectTimer();
 
-          console.log("\n======================================");
-          console.log("✅ SHEIKH-MD CONNECTED SUCCESSFULLY");
           console.log(
-            `🤖 Bot: ${config.botName || "SHEIKH-MD"}`
+            "\n======================================"
           );
+
           console.log(
-            `⚡ Prefix: ${config.prefix || "."}`
+            "✅ SHEIKH-MD CONNECTED SUCCESSFULLY"
           );
+
           console.log(
-            `🌍 Mode: ${config.botMode || "public"}`
-          );
-          console.log(
-            `👑 SUDO: ${
-              SUDO_NUMBER || "Not configured"
+            `🤖 Bot: ${
+              config.botName ||
+              "SHEIKH-MD"
             }`
           );
-          console.log("💬 Self-number commands: ENABLED");
-          console.log("======================================\n");
+
+          console.log(
+            `⚡ Prefix: ${
+              config.prefix || "."
+            }`
+          );
+
+          console.log(
+            `🌍 Mode: ${
+              config.botMode || "public"
+            }`
+          );
+
+          console.log(
+            `👑 SUDO: ${
+              SUDO_NUMBER ||
+              "Not configured"
+            }`
+          );
+
+          console.log(
+            "💬 Self-number commands: ENABLED"
+          );
+
+          console.log(
+            `📂 Session saved at: ${SESSION_DIR}`
+          );
+
+          console.log(
+            "======================================\n"
+          );
         }
 
-        // ----------------------------------------------
-        // CONNECTION CLOSED
-        // ----------------------------------------------
+        /* ----------------------------------------------
+           CONNECTION CLOSED
+        ---------------------------------------------- */
 
         if (connection === "close") {
           isStarting = false;
           currentSocket = null;
 
           const statusCode =
-            getDisconnectCode(lastDisconnect);
+            getDisconnectCode(
+              lastDisconnect
+            );
 
           const shouldLogout =
-            statusCode === DisconnectReason.loggedOut;
+            statusCode ===
+            DisconnectReason.loggedOut;
 
           const wasReplaced =
-            statusCode === DisconnectReason.connectionReplaced;
-
-          const shouldRestart =
-            statusCode !== DisconnectReason.loggedOut &&
-            statusCode !== DisconnectReason.connectionReplaced;
+            statusCode ===
+            DisconnectReason.connectionReplaced;
 
           console.log(
             `⚠️ Connection closed. Code: ${
@@ -425,9 +668,11 @@ async function startBot() {
             console.log(
               "❌ WhatsApp session logged out."
             );
+
             console.log(
-              "Delete the old session and pair again."
+              "Delete the session folder and pair again."
             );
+
             return;
           }
 
@@ -435,43 +680,55 @@ async function startBot() {
             console.log(
               "❌ Connection replaced by another session."
             );
+
             console.log(
-              "Check linked devices and pair again if required."
+              "Check WhatsApp Linked Devices."
             );
+
             return;
           }
 
-          if (shouldRestart) {
-            scheduleReconnect();
-          }
+          scheduleReconnect();
         }
       }
     );
 
-    // ==================================================
-    // MESSAGE HANDLER
-    // ==================================================
+    /* ==================================================
+       MESSAGE HANDLER
+    ================================================== */
 
     sock.ev.on(
       "messages.upsert",
-      async ({ messages, type }) => {
+      async ({
+        messages,
+        type
+      }) => {
         if (type !== "notify") {
           return;
         }
 
         for (const message of messages) {
           try {
-            if (!isValidMessage(message)) {
+            if (
+              !isValidMessage(message)
+            ) {
               continue;
             }
 
-            // Do not ignore fromMe.
-            // This enables WhatsApp "Message yourself" commands.
+            /*
+              fromMe messages are intentionally
+              not ignored. This enables self-number
+              commands from WhatsApp "Message yourself".
+            */
+
             await handleMessage(
               sock,
               message,
               {
-                allowSelf: true
+                allowSelf: true,
+                sudoNumber: SUDO_NUMBER,
+                sessionId: SESSION_ID,
+                sessionName: SESSION_NAME
               }
             );
           } catch (error) {
@@ -491,16 +748,18 @@ async function startBot() {
 
     console.error(
       "❌ Fatal startup error:",
-      error?.stack || error?.message || error
+      error?.stack ||
+        error?.message ||
+        error
     );
 
     scheduleReconnect();
   }
 }
 
-// ======================================================
-// GRACEFUL SHUTDOWN
-// ======================================================
+/* ======================================================
+   GRACEFUL SHUTDOWN
+====================================================== */
 
 async function shutdown(signal) {
   if (shuttingDown) {
@@ -510,7 +769,9 @@ async function shutdown(signal) {
   shuttingDown = true;
   clearReconnectTimer();
 
-  console.log(`\n🛑 Received ${signal}. Shutting down...`);
+  console.log(
+    `\n🛑 Received ${signal}. Shutting down...`
+  );
 
   try {
     if (currentSocket) {
@@ -525,7 +786,10 @@ async function shutdown(signal) {
 
   try {
     healthServer.close(() => {
-      console.log("🌐 Health server stopped.");
+      console.log(
+        "🌐 Health server stopped."
+      );
+
       process.exit(0);
     });
   } catch {
@@ -533,17 +797,26 @@ async function shutdown(signal) {
   }
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on(
+  "SIGINT",
+  () => shutdown("SIGINT")
+);
 
-// ======================================================
-// START APPLICATION
-// ======================================================
+process.on(
+  "SIGTERM",
+  () => shutdown("SIGTERM")
+);
+
+/* ======================================================
+   START APPLICATION
+====================================================== */
 
 startBot().catch((error) => {
   console.error(
     "❌ Startup failed:",
-    error?.stack || error?.message || error
+    error?.stack ||
+      error?.message ||
+      error
   );
 
   process.exit(1);

@@ -1,6 +1,6 @@
 /**
  * SHEIKH-MD WhatsApp Bot
- * QR + Pairing Code + Self Number Support
+ * QR Browser Page + Pairing Code + Self Number Support
  * Custom Session Directory + SUDO Environment Support
  */
 
@@ -12,7 +12,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const P = require("pino");
-const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode");
 
 const {
   default: makeWASocket,
@@ -36,21 +36,17 @@ const PORT = Number(
   process.env.PORT || 3000
 );
 
-const SESSION_NAME =
-  String(
-    process.env.SESSION_NAME ||
-      config.sessionName ||
-      "sheikh-md"
-  ).trim();
+const SESSION_NAME = String(
+  process.env.SESSION_NAME ||
+    config.sessionName ||
+    "sheikh-md"
+).trim();
 
 /*
   SESSION_DIR priority:
 
   1. SESSION_DIR from environment
   2. ./sessions/SESSION_NAME
-
-  Example:
-  SESSION_DIR=./sessions/sheikh-md
 */
 
 const SESSION_DIR = path.resolve(
@@ -72,12 +68,11 @@ const SUDO_NUMBER = String(
     ""
 ).replace(/\D/g, "");
 
-const CONNECTION_METHOD =
-  String(
-    process.env.CONNECTION_METHOD ||
-      config.connectionMethod ||
-      "both"
-  ).toLowerCase();
+const CONNECTION_METHOD = String(
+  process.env.CONNECTION_METHOD ||
+    config.connectionMethod ||
+    "both"
+).toLowerCase();
 
 const PAIRING_NUMBER = String(
   process.env.PAIRING_NUMBER ||
@@ -95,16 +90,312 @@ let currentSocket = null;
 let shuttingDown = false;
 let restartAttempts = 0;
 
+/*
+  Browser QR state
+*/
+
+let latestQR = null;
+let qrGeneratedAt = null;
+
 /* ======================================================
-   HEALTH SERVER
+   HEALTH SERVER + QR WEB PAGE
 ====================================================== */
 
 const healthServer = http.createServer(
   (req, res) => {
-    if (req.url === "/health" || req.url === "/") {
+    /*
+      ================================================
+      QR WEB PAGE
+      Open:
+      https://your-app.onrender.com/qr
+      ================================================
+    */
+
+    if (req.url === "/qr") {
       res.writeHead(200, {
-        "Content-Type":
-          "application/json; charset=utf-8",
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store"
+      });
+
+      return res.end(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+
+  <title>SHEIKH-MD QR Pairing</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      font-family: Arial, Helvetica, sans-serif;
+      background:
+        radial-gradient(
+          circle at top,
+          #163b28 0%,
+          #07110d 45%,
+          #030806 100%
+        );
+      color: #ffffff;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 440px;
+      text-align: center;
+      padding: 28px 20px 24px;
+      border: 1px solid #285a40;
+      border-radius: 24px;
+      background: rgba(13, 29, 21, 0.96);
+      box-shadow:
+        0 20px 70px rgba(0, 0, 0, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .logo {
+      width: 65px;
+      height: 65px;
+      margin: 0 auto 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 20px;
+      background: #20c76a;
+      font-size: 32px;
+      box-shadow: 0 8px 25px rgba(32, 199, 106, 0.22);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      letter-spacing: 0.5px;
+    }
+
+    .subtitle {
+      margin-top: 9px;
+      margin-bottom: 24px;
+      color: #a9c9b5;
+      font-size: 14px;
+    }
+
+    .qr-wrapper {
+      width: 100%;
+      min-height: 315px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 17px;
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: 0 10px 35px rgba(0, 0, 0, 0.25);
+    }
+
+    #qrImage {
+      display: none;
+      width: 100%;
+      max-width: 285px;
+      height: auto;
+      image-rendering: pixelated;
+    }
+
+    #status {
+      display: block;
+      color: #263d2d;
+      font-size: 15px;
+      line-height: 1.7;
+      font-weight: 600;
+    }
+
+    .steps {
+      margin-top: 22px;
+      padding: 16px;
+      border: 1px solid #214a34;
+      border-radius: 15px;
+      background: #11271b;
+      color: #d9eee0;
+      text-align: left;
+      font-size: 14px;
+      line-height: 1.9;
+    }
+
+    .steps strong {
+      color: #45e58b;
+    }
+
+    .footer {
+      margin-top: 20px;
+      color: #789987;
+      font-size: 12px;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-top: 17px;
+      padding: 7px 14px;
+      border-radius: 30px;
+      background: #1b6b43;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <div class="logo">📲</div>
+
+    <h1>SHEIKH-MD</h1>
+
+    <div class="subtitle">
+      WhatsApp QR Pairing Panel
+    </div>
+
+    <div class="qr-wrapper">
+      <img
+        id="qrImage"
+        alt="WhatsApp QR Code"
+      />
+
+      <div id="status">
+        ⏳ Waiting for QR code...
+      </div>
+    </div>
+
+    <div class="steps">
+      <strong>QR Scan Karne Ka Tareeqa:</strong><br />
+      1. WhatsApp open karo<br />
+      2. Settings par jao<br />
+      3. Linked devices select karo<br />
+      4. Link a device par tap karo<br />
+      5. Neeche wala QR scan karo
+    </div>
+
+    <div class="badge">
+      🔄 QR Auto Refresh Enabled
+    </div>
+
+    <div class="footer">
+      SHEIKH-MD WhatsApp Bot
+    </div>
+  </div>
+
+  <script>
+    const qrImage = document.getElementById("qrImage");
+    const statusText = document.getElementById("status");
+
+    async function loadQR() {
+      try {
+        const response = await fetch(
+          "/qr-data?t=" + Date.now(),
+          {
+            cache: "no-store"
+          }
+        );
+
+        const data = await response.json();
+
+        /*
+          Connected state
+        */
+
+        if (data.connected) {
+          qrImage.style.display = "none";
+          statusText.style.display = "block";
+          statusText.innerHTML =
+            "✅ WhatsApp connected successfully!<br />" +
+            "Bot is now online.";
+
+          return;
+        }
+
+        /*
+          QR available
+        */
+
+        if (data.qr) {
+          qrImage.src = data.qr;
+          qrImage.style.display = "block";
+          statusText.style.display = "none";
+        } else {
+          qrImage.style.display = "none";
+          statusText.style.display = "block";
+          statusText.innerHTML =
+            "⏳ QR code generate ho raha hai...<br />" +
+            "Please wait.";
+        }
+      } catch (error) {
+        qrImage.style.display = "none";
+        statusText.style.display = "block";
+        statusText.innerHTML =
+          "⚠️ QR load nahi ho saka.<br />" +
+          "Dobara try ho raha hai...";
+      }
+    }
+
+    loadQR();
+
+    /*
+      Refresh QR status every 2.5 seconds
+    */
+
+    setInterval(loadQR, 2500);
+  </script>
+</body>
+</html>
+      `);
+    }
+
+    /*
+      ================================================
+      QR DATA API
+      ================================================
+    */
+
+    if (req.url.startsWith("/qr-data")) {
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*"
+      });
+
+      return res.end(
+        JSON.stringify({
+          success: true,
+          qr: latestQR,
+          generatedAt: qrGeneratedAt,
+          connected: Boolean(
+            currentSocket?.user
+          )
+        })
+      );
+    }
+
+    /*
+      ================================================
+      HEALTH API
+      ================================================
+    */
+
+    if (
+      req.url === "/health" ||
+      req.url === "/"
+    ) {
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
         "Cache-Control": "no-store"
       });
 
@@ -112,28 +403,26 @@ const healthServer = http.createServer(
         JSON.stringify({
           success: true,
           status: "ok",
-          bot:
-            config.botName ||
-            "SHEIKH-MD",
-          service:
-            "SHEIKH-MD WhatsApp Bot",
+          bot: config.botName || "SHEIKH-MD",
+          service: "SHEIKH-MD WhatsApp Bot",
           sessionName: SESSION_NAME,
-          sessionId:
-            SESSION_ID || null,
-          sessionDirectory:
-            SESSION_DIR,
-          uptime: Math.floor(
-            process.uptime()
-          ),
-          timestamp:
-            new Date().toISOString()
+          sessionId: SESSION_ID || null,
+          sessionDirectory: SESSION_DIR,
+          qrPage: "/qr",
+          uptime: Math.floor(process.uptime()),
+          timestamp: new Date().toISOString()
         })
       );
     }
 
+    /*
+      ================================================
+      404 ROUTE
+      ================================================
+    */
+
     res.writeHead(404, {
-      "Content-Type":
-        "application/json; charset=utf-8"
+      "Content-Type": "application/json; charset=utf-8"
     });
 
     res.end(
@@ -151,6 +440,10 @@ healthServer.listen(
   () => {
     console.log(
       `🌐 Health server running on port ${PORT}`
+    );
+
+    console.log(
+      `📲 QR page route available at: /qr`
     );
   }
 );
@@ -214,9 +507,11 @@ function printStartupInformation() {
   console.log(
     "\n======================================"
   );
+
   console.log(
     "🚀 SHEIKH-MD STARTING"
   );
+
   console.log(
     "======================================"
   );
@@ -415,6 +710,11 @@ async function startBot() {
         "Chrome"
       ),
 
+      /*
+        We manually show QR on browser,
+        so terminal QR is disabled.
+      */
+
       printQRInTerminal: false,
 
       markOnlineOnConnect: false,
@@ -486,12 +786,33 @@ async function startBot() {
           );
 
           console.log(
-            "WhatsApp > Settings > Linked devices > Link a device\n"
+            "Open your Render URL + /qr in browser."
           );
 
-          qrcode.generate(qr, {
-            small: true
-          });
+          try {
+            latestQR = await QRCode.toDataURL(
+              qr,
+              {
+                errorCorrectionLevel: "M",
+                margin: 2,
+                width: 400
+              }
+            );
+
+            qrGeneratedAt =
+              new Date().toISOString();
+
+            console.log(
+              "✅ QR image is available at: /qr"
+            );
+          } catch (error) {
+            console.error(
+              "❌ Failed to generate browser QR:",
+              error?.stack ||
+                error?.message ||
+                error
+            );
+          }
         }
 
         /* ----------------------------------------------
@@ -590,6 +911,13 @@ async function startBot() {
           restartAttempts = 0;
           clearReconnectTimer();
 
+          /*
+            Hide QR after successful connection
+          */
+
+          latestQR = null;
+          qrGeneratedAt = null;
+
           console.log(
             "\n======================================"
           );
@@ -639,11 +967,18 @@ async function startBot() {
 
         /* ----------------------------------------------
            CONNECTION CLOSED
-        ---------------------------------------------- */
+        --------------
 
         if (connection === "close") {
           isStarting = false;
           currentSocket = null;
+
+          /*
+            Clear old QR when connection closes
+          */
+
+          latestQR = null;
+          qrGeneratedAt = null;
 
           const statusCode =
             getDisconnectCode(

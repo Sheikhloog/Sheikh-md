@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: sheikh-md
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: BOT_NAME
+        sync: false
+      - key: OWNER_NAME
+        sync: false
+      - key: OWNER_NUMBER
+        sync: false
+      - key: PREFIX
+        value: "."
+      - key: SESSION_NAME
+        value: "sheikh-md"
+      - key: CONNECTION_METHOD
+        value: "qr"
+      - key: PAIRING_NUMBER
+        sync: false
+      - key: BOT_MODE
+        value: "public"
+      - key: LOG_LEVEL
+        value: "info"

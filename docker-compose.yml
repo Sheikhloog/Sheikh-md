@@ -1,0 +1,11 @@
+services:
+  sheikh-md:
+    build: .
+    container_name: sheikh-md
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./sessions:/app/sessions
+    stdin_open: true
+    tty: true

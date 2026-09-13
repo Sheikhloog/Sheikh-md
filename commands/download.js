@@ -14,8 +14,49 @@ const MAX_FILE_SIZE = 60 * 1024 * 1024; // 60 MB
 const DOWNLOAD_TIMEOUT = 180000; // 3 minutes
 const SELECTION_EXPIRE_TIME = 10 * 60 * 1000; // 10 minutes
 
+// Render Secret File path
+// Environment variable se custom path bhi de sakte ho
+const COOKIES_PATH =
+  process.env.YT_COOKIES_PATH ||
+  "/etc/secrets/cookies.txt";
+
 // Menu message ID => selected media information
 const pendingSelections = new Map();
+
+// ======================================================
+// COOKIE CHECK
+// ======================================================
+
+function getCookiesOptions() {
+  try {
+    if (fs.existsSync(COOKIES_PATH)) {
+      const stats = fs.statSync(COOKIES_PATH);
+
+      if (stats.size > 0) {
+        console.log(
+          `🍪 YouTube cookies loaded: ${COOKIES_PATH}`
+        );
+
+        return {
+          cookies: COOKIES_PATH
+        };
+      }
+
+      console.warn("⚠️ Cookies file empty hai.");
+    } else {
+      console.warn(
+        `⚠️ Cookies file nahi mili: ${COOKIES_PATH}`
+      );
+    }
+  } catch (error) {
+    console.warn(
+      "⚠️ Cookies check failed:",
+      error?.message || error
+    );
+  }
+
+  return {};
+}
 
 // ======================================================
 // TEMP FILE HELPERS
@@ -96,7 +137,9 @@ function getFileSize(filePath) {
 
 function validateFile(filePath) {
   if (!fs.existsSync(filePath)) {
-    throw new Error("Downloaded file create nahi hui.");
+    throw new Error(
+      `Downloaded file create nahi hui: ${filePath}`
+    );
   }
 
   const size = getFileSize(filePath);
@@ -136,20 +179,24 @@ function formatSize(bytes) {
   return `${mb.toFixed(1)}MB`;
 }
 
-// Approximate audio size:
-// bitrate(kbps) × duration(seconds) ÷ 8
+// Approximate audio size
 function estimateAudioSize(durationSeconds, bitrate) {
   if (!durationSeconds) return 0;
 
   return durationSeconds * (bitrate * 1000 / 8);
 }
 
-// Approximate video size using average bitrate.
-// Actual size can differ depending on video.
+// Approximate video size
 function estimateVideoSize(durationSeconds, bitrateMbps) {
   if (!durationSeconds) return 0;
 
-  return durationSeconds * bitrateMbps * 1000 * 1000 / 8;
+  return (
+    durationSeconds *
+    bitrateMbps *
+    1000 *
+    1000 /
+    8
+  );
 }
 
 // ======================================================
@@ -337,6 +384,7 @@ async function downloadSelectedAudio({
   bitrate
 }) {
   const tempDir = createTempDirectory();
+
   const outputPath = path.join(
     tempDir,
     "audio.%(ext)s"
@@ -349,19 +397,26 @@ async function downloadSelectedAudio({
       `⏳ MP3 ${bitrate}kbps download ho raha hai...`
     );
 
+    const cookieOptions = getCookiesOptions();
+
     await ytDlp(
       selection.url,
       {
         output: outputPath,
+
         extractAudio: true,
         audioFormat: "mp3",
+
+        // Better quality setting
         audioQuality: bitrate === 256 ? "0" : "5",
+
         ffmpegLocation: ffmpegPath,
         noPlaylist: true,
-        noWarnings: true,
-        quiet: true,
+
         retries: 2,
-        socketTimeout: 30000
+        socketTimeout: 30000,
+
+        ...cookieOptions
       },
       {
         timeout: DOWNLOAD_TIMEOUT
@@ -396,13 +451,21 @@ async function downloadSelectedAudio({
   } catch (error) {
     console.error(
       "❌ Audio download error:",
-      error?.stack || error
+      error?.stderr ||
+        error?.stdout ||
+        error?.stack ||
+        error
     );
 
     await sendText(
       sock,
       message,
-      `❌ MP3 download failed.\n\nYouTube ne download request block ki hai ya format available nahi hai.`
+      `❌ MP3 download failed.
+
+YouTube ne download request block ki hai ya cookies invalid/expired hain.
+
+🔗 Video link:
+${selection.url}`
     );
   } finally {
     cleanDirectory(tempDir);
@@ -419,6 +482,7 @@ async function downloadSelectedVideo({
   selection
 }) {
   const tempDir = createTempDirectory();
+
   const outputPath = path.join(
     tempDir,
     "video.%(ext)s"
@@ -431,19 +495,24 @@ async function downloadSelectedVideo({
       "⏳ MP4 720p download ho raha hai..."
     );
 
+    const cookieOptions = getCookiesOptions();
+
     await ytDlp(
       selection.url,
       {
         output: outputPath,
+
         format:
-          "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]",
+          "bv*[height<=720]+ba/b[height<=720]",
+
         mergeOutputFormat: "mp4",
         ffmpegLocation: ffmpegPath,
         noPlaylist: true,
-        noWarnings: true,
-        quiet: true,
+
         retries: 2,
-        socketTimeout: 30000
+        socketTimeout: 30000,
+
+        ...cookieOptions
       },
       {
         timeout: DOWNLOAD_TIMEOUT
@@ -478,13 +547,21 @@ async function downloadSelectedVideo({
   } catch (error) {
     console.error(
       "❌ Video download error:",
-      error?.stack || error
+      error?.stderr ||
+        error?.stdout ||
+        error?.stack ||
+        error
     );
 
     await sendText(
       sock,
       message,
-      "❌ MP4 download failed.\n\nYouTube ne download request block ki hai ya video format available nahi hai."
+      `❌ MP4 download failed.
+
+YouTube ne download request block ki hai ya cookies invalid/expired hain.
+
+🔗 Video link:
+${selection.url}`
     );
   } finally {
     cleanDirectory(tempDir);

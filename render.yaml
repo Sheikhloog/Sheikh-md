@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: sheikh-md
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: BOT_NAME
+        value: "𝙎𝙃𝙀𝙄𝙆𝙃-𝙈𝘿 "
+      - key: OWNER_NAME
+          value: " 𝙎𝙃𝙀𝙄𝙆𝙃 𝟬𝟬𝟳 "
+      - key: OWNER_NUMBER
+          value: " +𝟵𝟮𝟯𝟭𝟴𝟯𝟯𝟱𝟲𝟮𝟭𝟳 "
+      - key: PREFIX
+        value: "."
+      - key: SESSION_NAME
+        value: "𝙎𝙃𝙀𝙄𝙆𝙃-𝙈𝘿 "
+      - key: CONNECTION_METHOD
+        value: "pairing code"
+      - key: PAIRING_NUMBER
+          value: "+923183356217"
+      - key: BOT_MODE
+        value: "public"
+      - key: LOG_LEVEL
+        value: "info"

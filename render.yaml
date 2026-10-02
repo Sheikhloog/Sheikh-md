@@ -20,9 +20,9 @@ services:
       - key: SESSION_NAME
         value: "𝙎𝙃𝙀𝙄𝙆𝙃-𝙈𝘿 "
       - key: CONNECTION_METHOD
-        value: "pairing code"
+        value: "pairing"
       - key: PAIRING_NUMBER
-          value: "+923183356217"
+          value: "923183356217"
       - key: BOT_MODE
         value: "public"
       - key: LOG_LEVEL

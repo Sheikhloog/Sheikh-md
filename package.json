@@ -1,0 +1,27 @@
+{
+  "name": "sheikh-md",
+  "version": "1.0.0",
+  "description": "SHEIKH-MD WhatsApp bot powered by Baileys",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "latest",
+    "@hapi/boom": "^10.0.1",
+    "axios": "^1.8.4",
+    "dotenv": "^16.4.7",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.33.5",
+    "yt-search": "^2.12.1",
+    "youtube-dl-exec": "latest",
+    "ffmpeg-static": "^5.2.0",
+    "link-preview-js": "^3.0.5"
+  }
+}
